@@ -14,6 +14,19 @@ const INITIAL_DATA = {
   chat: []
 };
 
+// --- SEGURIDAD: SANITIZACIÓN XSS ---
+// Escapa caracteres HTML peligrosos antes de insertar datos en innerHTML.
+// SIEMPRE usar esta función con datos que vienen de la BD o del usuario.
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 // --- MODALES Y UTILIDADES ---
 function openModal(id) {
   const el = document.getElementById(id);
@@ -513,7 +526,12 @@ async function createCustomer() {
 
   const name = nameInput.value.trim();
   const phone = phoneInput.value.trim();
-  const code = codeInput.value.trim() || Math.floor(1000 + Math.random() * 9000).toString();
+  // PIN alfanumérico de 6 caracteres — mucho más difícil de adivinar que 4 dígitos
+  const generateSecurePin = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Sin 0,O,1,I para evitar confusiones
+    return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  };
+  const code = codeInput.value.trim() || generateSecurePin();
   const notes = notesInput.value.trim();
 
   if (!name || !phone) {
@@ -555,7 +573,7 @@ async function createCustomer() {
           alert('Atención al guardar en Supabase: ' + custErr.message);
         } else if (createdCust && createdCust.length > 0) {
           newId = createdCust[0].id;
-          console.log('✅ Cliente guardado con éxito en Supabase:', createdCust[0]);
+          // No se loguean datos del cliente por seguridad
         }
       }
     } catch(e) {
@@ -585,8 +603,12 @@ function openAddItemModal(customerId) {
   openModal('modalAddItem');
 }
 
-// ANOTAR PRODUCTO FIADO (SUPABASE & LOCAL)
+// ANOTAR PRODUCTO FIADO (SUPABASE & LOCAL) — solo vendedores
 async function createFiadoItem() {
+  if (!currentUser || currentUser.role !== 'vendedor') {
+    alert('Acción no permitida.');
+    return;
+  }
   const nameInput = document.getElementById('itemName');
   const qtyInput = document.getElementById('itemQty');
   const priceInput = document.getElementById('itemPrice');
@@ -659,8 +681,12 @@ function openPaymentModal(customerId) {
   openModal('modalPayment');
 }
 
-// REGISTRAR ABONO / PAGO (SUPABASE & LOCAL)
+// REGISTRAR ABONO / PAGO (SUPABASE & LOCAL) — solo vendedores
 async function createPayment() {
+  if (!currentUser || currentUser.role !== 'vendedor') {
+    alert('Acción no permitida.');
+    return;
+  }
   const amountInput = document.getElementById('payAmount');
   const amount = parseFloat(amountInput.value);
   const method = document.getElementById('payMethod').value;
@@ -766,8 +792,12 @@ async function submitDiscrepancy() {
   alert('Reporte enviado al vendedor por el chat.');
 }
 
-// ELIMINAR ÍTEM
+// ELIMINAR ÍTEM — solo vendedores autenticados
 async function deleteItem(itemId) {
+  if (!currentUser || currentUser.role !== 'vendedor') {
+    alert('Acción no permitida.');
+    return;
+  }
   if (confirm('¿Eliminar este ítem del historial fiado?')) {
     if (supabaseClient) {
       await supabaseClient.from('fiado_items').delete().eq('id', itemId);
@@ -893,13 +923,13 @@ function renderVendedorView(container) {
           <div class="customer-card ${isSelected ? 'selected' : ''}" style="${isSelected ? 'border-color: var(--primary-pastel); background: var(--bg-subtle);' : ''}">
             <div class="customer-card-header">
               <div style="display: flex; gap: 12px; align-items: center;">
-                <div class="customer-avatar">${c.name.charAt(0)}</div>
+                <div class="customer-avatar">${escapeHtml(c.name.charAt(0))}</div>
                 <div>
-                  <div class="customer-name">${c.name}</div>
-                  <div class="customer-phone">📱 ${c.phone}</div>
+                  <div class="customer-name">${escapeHtml(c.name)}</div>
+                  <div class="customer-phone">📱 ${escapeHtml(c.phone)}</div>
                 </div>
               </div>
-              <span class="customer-code-badge">PIN: ${c.code}</span>
+              <span class="customer-code-badge">PIN: ${escapeHtml(c.code)}</span>
             </div>
             
             <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 8px;">
@@ -931,9 +961,9 @@ function renderVendedorView(container) {
         <div class="section-header">
           <div>
             <div class="section-title">
-              <span>📋 Cuenta de: ${activeCustomer.name}</span>
+              <span>📋 Cuenta de: ${escapeHtml(activeCustomer.name)}</span>
             </div>
-            <p style="font-size: 0.85rem; color: var(--text-muted);">PIN de acceso para el cliente: <strong>${activeCustomer.code}</strong></p>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">PIN de acceso para el cliente: <strong>${escapeHtml(activeCustomer.code)}</strong></p>
           </div>
           <div style="display: flex; gap: 10px;">
             <button class="btn btn-secondary btn-sm" onclick="openPaymentModal('${activeCustomer.id}')">
@@ -963,9 +993,9 @@ function renderVendedorView(container) {
                 <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">No hay productos fiados registrados en esta cuenta.</td></tr>
               ` : activeItems.map(item => `
                 <tr>
-                  <td>${item.date}</td>
-                  <td><strong>${item.name}</strong></td>
-                  <td>${item.qty}</td>
+                  <td>${escapeHtml(item.date)}</td>
+                  <td><strong>${escapeHtml(item.name)}</strong></td>
+                  <td>${escapeHtml(String(item.qty))}</td>
                   <td>S/ ${item.unitPrice.toFixed(2)}</td>
                   <td><strong>S/ ${(item.qty * item.unitPrice).toFixed(2)}</strong></td>
                   <td>
@@ -983,15 +1013,15 @@ function renderVendedorView(container) {
         </div>
 
         <div style="margin-top: 24px;">
-          <div class="section-title" style="margin-bottom: 12px;">💬 Chat con ${activeCustomer.name}</div>
+          <div class="section-title" style="margin-bottom: 12px;">💬 Chat con ${escapeHtml(activeCustomer.name)}</div>
           <div class="chat-box">
             <div class="chat-messages" id="chatContainer">
               ${activeChat.length === 0 ? `
                 <div class="chat-bubble sistema">Inicio de la conversación con el cliente.</div>
               ` : activeChat.map(msg => `
-                <div class="chat-bubble ${msg.sender}">
-                  ${msg.text}
-                  <span class="timestamp">${msg.time}</span>
+                <div class="chat-bubble ${escapeHtml(msg.sender)}">
+                  ${escapeHtml(msg.text)}
+                  <span class="timestamp">${escapeHtml(msg.time)}</span>
                 </div>
               `).join('')}
             </div>
@@ -1019,7 +1049,7 @@ function renderClienteView(container) {
     <div class="customer-welcome-card">
       <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
         <div>
-          <h2>Hola, ${currentUser ? currentUser.name : (activeCustomer ? activeCustomer.name : 'Cliente')} 👋</h2>
+          <h2>Hola, ${escapeHtml(currentUser ? currentUser.name : (activeCustomer ? activeCustomer.name : 'Cliente'))} 👋</h2>
           <p>Consulta el historial de tus productos fiados en tu tienda de confianza.</p>
         </div>
         <div style="background: rgba(255,255,255,0.2); padding: 8px 16px; border-radius: var(--radius-md); text-align: right;">
@@ -1031,7 +1061,7 @@ function renderClienteView(container) {
       <div style="margin-top: 14px; display: flex; align-items: center; justify-content: space-between; background: rgba(0,0,0,0.15); padding: 10px 16px; border-radius: var(--radius-md); flex-wrap: wrap; gap: 10px;">
         <div>
           <span style="font-size: 0.85rem; font-weight: 700;">🔑 PIN de Cuenta Vinculada:</span>
-          <strong style="font-size: 1rem; margin-left: 6px;">${activeCustomer ? (activeCustomer.code || 'Ninguno') : 'Ninguno'}</strong>
+          <strong style="font-size: 1rem; margin-left: 6px;">${activeCustomer ? escapeHtml(activeCustomer.code || 'Ninguno') : 'Ninguno'}</strong>
         </div>
         <button class="btn btn-secondary btn-sm" onclick="openLinkPinModal()">
           🔗 Ingresar / Cambiar PIN
@@ -1065,9 +1095,9 @@ function renderClienteView(container) {
               <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">No tienes productos pendientes en tu cuenta. ¡Estás al día! 🎉</td></tr>
             ` : activeItems.map(item => `
               <tr>
-                <td>${item.date}</td>
-                <td><strong>${item.name}</strong></td>
-                <td>${item.qty}</td>
+                <td>${escapeHtml(item.date)}</td>
+                <td><strong>${escapeHtml(item.name)}</strong></td>
+                <td>${escapeHtml(String(item.qty))}</td>
                 <td>S/ ${item.unitPrice.toFixed(2)}</td>
                 <td><strong style="color: var(--primary-deep);">S/ ${(item.qty * item.unitPrice).toFixed(2)}</strong></td>
                 <td>
@@ -1100,9 +1130,9 @@ function renderClienteView(container) {
           ${activeChat.length === 0 ? `
             <div class="chat-bubble sistema">Puedes escribirle directamente a la tienda aquí.</div>
           ` : activeChat.map(msg => `
-            <div class="chat-bubble ${msg.sender}">
-              ${msg.text}
-              <span class="timestamp">${msg.time}</span>
+            <div class="chat-bubble ${escapeHtml(msg.sender)}">
+              ${escapeHtml(msg.text)}
+              <span class="timestamp">${escapeHtml(msg.time)}</span>
             </div>
           `).join('')}
         </div>
