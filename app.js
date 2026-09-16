@@ -31,6 +31,7 @@ function closeModal(id) {
 let appState = { ...EMPTY_STATE };
 let currentUser = null;
 let pendingGoogleUser = null;
+let isSavingRole = false;
 let authTabMode = 'login';
 let registerRole = 'vendedor';
 let selectedCustomerId = null;
@@ -79,7 +80,7 @@ function initSupabaseClient() {
 
 // CARGA REAL DE DATOS DESDE SUPABASE (CLIENTES, ÍTEMS, PAGOS, CHAT)
 async function fetchDataFromSupabase() {
-  if (!supabaseClient) return;
+  if (!supabaseClient) return false;
 
   try {
     appState = { ...EMPTY_STATE };
@@ -145,8 +146,10 @@ async function fetchDataFromSupabase() {
         renderClienteView(document.getElementById('clienteScreen'));
       }
     }
+    return true;
   } catch(e) {
     console.error('Error cargando datos de Supabase:', e);
+    return false;
   }
 }
 
@@ -217,9 +220,10 @@ async function confirmLinkPin() {
     currentUser.pin = pin;
     const { data: customer } = await supabaseClient.from('customers').select('full_name').eq('id', customerId).single();
     if (customer?.full_name) currentUser.name = customer.full_name;
-    saveSession(currentUser);
     closeModal('modalLinkPin');
-    renderClienteView(document.getElementById('clienteScreen'));
+    saveSession(currentUser);
+    const synchronized = await fetchDataFromSupabase();
+    if (!synchronized) return alert('El PIN fue vinculado, pero no se pudieron cargar los movimientos. Verifica que la migración de Supabase esté aplicada y recarga la página.');
     alert('¡Excelente! Tu cuenta ha sido vinculada y sincronizada.');
   } else {
     alert('No fue posible vincular el PIN: ' + (error?.message || 'código no encontrado'));
@@ -236,13 +240,19 @@ async function loginWithGoogle() {
 }
 
 async function confirmGoogleRole(role) {
-  if (!pendingGoogleUser) return;
+  if (!pendingGoogleUser || isSavingRole) return;
+  isSavingRole = true;
   const { error } = await supabaseClient.rpc('complete_my_profile', { p_role: role });
-  if (error) return alert('No se pudo guardar tu rol: ' + error.message);
+  if (error) {
+    isSavingRole = false;
+    return alert('No se pudo guardar tu rol: ' + error.message);
+  }
   closeModal('modalGoogleRoleSelect');
   const user = pendingGoogleUser;
   pendingGoogleUser = null;
+  isSavingRole = false;
   saveSession({ ...user, role });
+  await fetchDataFromSupabase();
 }
 
 async function handleSupabaseSession(supabaseUser) {
@@ -259,6 +269,7 @@ async function handleSupabaseSession(supabaseUser) {
       role: finalRole,
       avatar: name.charAt(0).toUpperCase()
     });
+    await fetchDataFromSupabase();
   } else {
     pendingGoogleUser = {
       id: supabaseUser.id,
