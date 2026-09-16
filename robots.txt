@@ -1,4 +1,2 @@
 User-agent: *
 Allow: /
-
-Sitemap: https://hoy-fio-manana-no.vercel.app/sitemap.xml
