@@ -1,0 +1,22 @@
+{
+  "name": "hoy-fio-manana-no",
+  "version": "1.0.0",
+  "description": "Aplicación web y PWA para control de fiados entre tiendas y clientes.",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve .",
+    "dev": "npx serve . --listen 3000",
+    "deploy": "npx vercel --prod"
+  },
+  "keywords": [
+    "pwa",
+    "fiados",
+    "supabase",
+    "google-auth"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.x"
+  }
+}
