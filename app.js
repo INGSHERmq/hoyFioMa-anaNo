@@ -2,17 +2,7 @@
    LÓGICA CONEXIÓN CON SUPABASE EN TIEMPO REAL - "HOY FÍO MAÑANA NO"
    ========================================================================== */
 
-const INITIAL_DATA = {
-  store: {
-    name: 'Mi Tienda / Bodega',
-    owner: '',
-    phone: ''
-  },
-  customers: [],
-  items: [],
-  payments: [],
-  chat: []
-};
+const EMPTY_STATE = { customers: [], items: [], payments: [], chat: [] };
 
 // --- SEGURIDAD: SANITIZACIÓN XSS ---
 // Escapa caracteres HTML peligrosos antes de insertar datos en innerHTML.
@@ -38,40 +28,7 @@ function closeModal(id) {
   if (el) el.classList.remove('open');
 }
 
-function loadState() {
-  const saved = localStorage.getItem('hoyfio_db');
-  if (saved) {
-    try { 
-      const parsed = JSON.parse(saved);
-      if (parsed.customers && parsed.customers.some(c => c.id === 'c1')) {
-        localStorage.removeItem('hoyfio_db');
-        return INITIAL_DATA;
-      }
-      return parsed; 
-    } catch(e) {}
-  }
-  return INITIAL_DATA;
-}
-
-function saveState() {
-  localStorage.setItem('hoyfio_db', JSON.stringify(appState));
-}
-
-function getGoogleUsersRegistry() {
-  const saved = localStorage.getItem('hoyfio_google_users');
-  if (saved) {
-    try { return JSON.parse(saved); } catch(e) {}
-  }
-  return {};
-}
-
-function saveGoogleUserRole(email, role) {
-  const registry = getGoogleUsersRegistry();
-  registry[email.toLowerCase()] = role;
-  localStorage.setItem('hoyfio_google_users', JSON.stringify(registry));
-}
-
-let appState = loadState();
+let appState = { ...EMPTY_STATE };
 let currentUser = null;
 let pendingGoogleUser = null;
 let authTabMode = 'login';
@@ -93,15 +50,10 @@ function initSupabaseClient() {
   const cfgKey = SUPABASE_CONFIG.anonKey;
   const statusBadge = document.getElementById('supabaseStatusDot');
 
-  if (document.getElementById('cfgSupabaseUrl')) {
-    document.getElementById('cfgSupabaseUrl').value = cfgUrl;
-    document.getElementById('cfgSupabaseKey').value = cfgKey;
-  }
-
   if (window.supabase && cfgUrl && cfgKey) {
     try {
       supabaseClient = window.supabase.createClient(cfgUrl, cfgKey);
-      if (statusBadge) statusBadge.innerText = '🟢 Supabase Conectado';
+      if (statusBadge) statusBadge.innerText = '🟢 Base de datos conectada';
       
       supabaseClient.auth.onAuthStateChange((event, session) => {
         if (session && session.user) {
@@ -111,13 +63,17 @@ function initSupabaseClient() {
         }
       });
 
-      fetchDataFromSupabase();
+      supabaseClient.auth.getSession().then(({ data: { session } }) => {
+        if (session?.user) handleSupabaseSession(session.user);
+        else showAuthScreen();
+      });
     } catch(err) {
       console.error('Error al inicializar Supabase:', err);
       if (statusBadge) statusBadge.innerText = '⚠️ Error Supabase';
     }
   } else {
-    if (statusBadge) statusBadge.innerText = '🟡 Almacenamiento Local';
+    if (statusBadge) statusBadge.innerText = '🔴 Base de datos no disponible';
+    alert('No se pudo iniciar la conexión segura con Supabase. Recarga la página o contacta al administrador.');
   }
 }
 
@@ -126,8 +82,9 @@ async function fetchDataFromSupabase() {
   if (!supabaseClient) return;
 
   try {
+    appState = { ...EMPTY_STATE };
     const { data: customersData, error: custErr } = await supabaseClient.from('customers').select('*');
-    if (custErr) console.error('Error consultando clientes:', custErr);
+    if (custErr) throw custErr;
 
     if (customersData) {
       appState.customers = customersData.map(c => ({
@@ -139,11 +96,16 @@ async function fetchDataFromSupabase() {
       }));
     }
 
-    const { data: itemsData } = await supabaseClient.from('fiado_items').select('*');
+    const { data: accountsData, error: accountsErr } = await supabaseClient.from('fiado_accounts').select('id, customer_id');
+    if (accountsErr) throw accountsErr;
+    const accountToCustomer = new Map((accountsData || []).map(a => [a.id, a.customer_id]));
+
+    const { data: itemsData, error: itemsErr } = await supabaseClient.from('fiado_items').select('*');
+    if (itemsErr) throw itemsErr;
     if (itemsData) {
       appState.items = itemsData.map(i => ({
         id: i.id,
-        customerId: i.account_id,
+        customerId: accountToCustomer.get(i.account_id),
         name: i.product_name,
         qty: parseFloat(i.quantity),
         unitPrice: parseFloat(i.unit_price),
@@ -152,18 +114,20 @@ async function fetchDataFromSupabase() {
       }));
     }
 
-    const { data: paymentsData } = await supabaseClient.from('payments').select('*');
+    const { data: paymentsData, error: paymentsErr } = await supabaseClient.from('payments').select('*');
+    if (paymentsErr) throw paymentsErr;
     if (paymentsData) {
       appState.payments = paymentsData.map(p => ({
         id: p.id,
-        customerId: p.account_id,
+        customerId: accountToCustomer.get(p.account_id),
         amount: parseFloat(p.amount),
         date: p.created_at ? p.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
         method: p.payment_method
       }));
     }
 
-    const { data: chatData } = await supabaseClient.from('chat_messages').select('*').order('created_at', { ascending: true });
+    const { data: chatData, error: chatErr } = await supabaseClient.from('chat_messages').select('*').order('created_at', { ascending: true });
+    if (chatErr) throw chatErr;
     if (chatData) {
       appState.chat = chatData.map(m => ({
         id: m.id,
@@ -174,7 +138,6 @@ async function fetchDataFromSupabase() {
       }));
     }
 
-    saveState();
     if (currentUser) {
       if (currentUser.role === 'vendedor') {
         renderVendedorView(document.getElementById('vendedorScreen'));
@@ -185,24 +148,6 @@ async function fetchDataFromSupabase() {
   } catch(e) {
     console.error('Error cargando datos de Supabase:', e);
   }
-}
-
-function saveSupabaseFromModal() {
-  const url = document.getElementById('cfgSupabaseUrl').value.trim();
-  const key = document.getElementById('cfgSupabaseKey').value.trim();
-
-  if (!url || !key) {
-    alert('Ingresa la URL y la Anon Key de tu proyecto en Supabase.');
-    return;
-  }
-  saveSupabaseCredentials(url, key);
-}
-
-function clearSupabaseConfig() {
-  localStorage.removeItem('supabase_url');
-  localStorage.removeItem('supabase_key');
-  logout();
-  window.location.reload();
 }
 
 function registerServiceWorker() {
@@ -227,21 +172,10 @@ function installPWA() {
   }
 }
 
-function checkSavedSession() {
-  const savedUser = sessionStorage.getItem('hoyfio_user');
-  if (savedUser) {
-    try {
-      currentUser = JSON.parse(savedUser);
-      renderAppByRole();
-      return;
-    } catch(e) {}
-  }
-  showAuthScreen();
-}
+function checkSavedSession() { showAuthScreen(); }
 
 function saveSession(user) {
   currentUser = user;
-  sessionStorage.setItem('hoyfio_user', JSON.stringify(user));
   renderAppByRole();
 }
 
@@ -250,73 +184,23 @@ async function logout() {
     try { await supabaseClient.auth.signOut(); } catch(e) {}
   }
   currentUser = null;
-  sessionStorage.removeItem('hoyfio_user');
-  localStorage.removeItem('hoyfio_user');
   showAuthScreen();
 }
 
 function switchAuthTab(mode) {
   authTabMode = mode;
   document.getElementById('tabLogin').classList.toggle('active', mode === 'login');
-  document.getElementById('tabPin').classList.toggle('active', mode === 'pin');
   document.getElementById('tabRegister').classList.toggle('active', mode === 'register');
   
-  const pinContainer = document.getElementById('pinLoginFormContainer');
-  const standardAuth = document.getElementById('standardAuthContainer');
-
-  if (mode === 'pin') {
-    pinContainer.style.display = 'block';
-    standardAuth.style.display = 'none';
-  } else {
-    pinContainer.style.display = 'none';
-    standardAuth.style.display = 'block';
-    document.getElementById('roleSelectorContainer').style.display = mode === 'register' ? 'block' : 'none';
-    document.getElementById('nameField').style.display = mode === 'register' ? 'block' : 'none';
-    document.getElementById('authSubmitBtn').innerText = mode === 'login' ? 'Iniciar Sesión' : 'Crear Cuenta';
-  }
+  document.getElementById('roleSelectorContainer').style.display = mode === 'register' ? 'block' : 'none';
+  document.getElementById('nameField').style.display = mode === 'register' ? 'block' : 'none';
+  document.getElementById('authSubmitBtn').innerText = mode === 'login' ? 'Iniciar Sesión' : 'Crear Cuenta';
 }
 
 function selectRegisterRole(role) {
   registerRole = role;
   document.getElementById('optVendedor').classList.toggle('selected', role === 'vendedor');
   document.getElementById('optCliente').classList.toggle('selected', role === 'cliente');
-}
-
-async function loginWithClientPin() {
-  const pin = document.getElementById('clientPinInput').value.trim();
-  if (!pin) {
-    alert('Por favor ingresa el PIN proporcionado por tu tendero.');
-    return;
-  }
-
-  let customerFound = null;
-
-  if (supabaseClient) {
-    const { data } = await supabaseClient
-      .from('customers')
-      .select('*')
-      .eq('access_code', pin)
-      .maybeSingle();
-
-    if (data) customerFound = data;
-  }
-
-  if (!customerFound) {
-    customerFound = appState.customers.find(c => c.code === pin);
-  }
-
-  if (customerFound) {
-    selectedCustomerId = customerFound.id;
-    saveSession({
-      name: customerFound.full_name || customerFound.name,
-      role: 'cliente',
-      pin: pin,
-      customerId: customerFound.id,
-      avatar: (customerFound.full_name || customerFound.name).charAt(0).toUpperCase()
-    });
-  } else {
-    alert('No se encontró ningún cliente registrado con ese PIN. Solicita a tu tendero que te proporcione tu PIN de acceso.');
-  }
 }
 
 async function confirmLinkPin() {
@@ -326,85 +210,46 @@ async function confirmLinkPin() {
     return;
   }
 
-  let customerFound = appState.customers.find(c => c.code === pin);
-
-  if (supabaseClient && !customerFound) {
-    const { data } = await supabaseClient
-      .from('customers')
-      .select('*')
-      .eq('access_code', pin)
-      .maybeSingle();
-      
-    if (data) customerFound = data;
-  }
-
-  if (customerFound) {
-    selectedCustomerId = customerFound.id;
-    if (currentUser) {
-      currentUser.customerId = customerFound.id;
-      currentUser.pin = pin;
-      currentUser.name = customerFound.full_name || customerFound.name;
-      saveSession(currentUser);
-    }
+  const { data: customerId, error } = await supabaseClient.rpc('link_my_customer', { p_access_code: pin });
+  if (!error && customerId) {
+    selectedCustomerId = customerId;
+    currentUser.customerId = customerId;
+    currentUser.pin = pin;
+    const { data: customer } = await supabaseClient.from('customers').select('full_name').eq('id', customerId).single();
+    if (customer?.full_name) currentUser.name = customer.full_name;
+    saveSession(currentUser);
     closeModal('modalLinkPin');
     renderClienteView(document.getElementById('clienteScreen'));
-    alert(`¡Excelente! Tu cuenta ha sido vinculada con ${customerFound.full_name || customerFound.name}.`);
+    alert('¡Excelente! Tu cuenta ha sido vinculada y sincronizada.');
   } else {
-    alert('El PIN ingresado no coincide con ningún cliente registrado. Revisa el código con tu tendero.');
+    alert('No fue posible vincular el PIN: ' + (error?.message || 'código no encontrado'));
   }
 }
 
 async function loginWithGoogle() {
-  if (supabaseClient) {
-    const { error } = await supabaseClient.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: window.location.origin,
-        queryParams: { prompt: 'select_account' }
-      }
-    });
-    if (error) alert('Error Google OAuth Supabase: ' + error.message);
-  } else {
-    const simulatedEmail = prompt('Ingresa tu correo de Google para ingresar:', 'usuario.google@gmail.com');
-    if (!simulatedEmail) return;
-
-    const googleRegistry = getGoogleUsersRegistry();
-    const existingRole = googleRegistry[simulatedEmail.toLowerCase()];
-
-    if (existingRole) {
-      saveSession({
-        name: simulatedEmail.split('@')[0],
-        email: simulatedEmail,
-        role: existingRole,
-        avatar: simulatedEmail.charAt(0).toUpperCase()
-      });
-    } else {
-      pendingGoogleUser = {
-        name: simulatedEmail.split('@')[0],
-        email: simulatedEmail,
-        avatar: simulatedEmail.charAt(0).toUpperCase()
-      };
-      openModal('modalGoogleRoleSelect');
-    }
-  }
+  if (!supabaseClient) return alert('La autenticación segura no está disponible. Recarga la página.');
+  const { error } = await supabaseClient.auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo: `${window.location.origin}${window.location.pathname}`, queryParams: { prompt: 'select_account' } }
+  });
+  if (error) alert('No se pudo iniciar Google: ' + error.message);
 }
 
-function confirmGoogleRole(role) {
-  if (pendingGoogleUser) {
-    saveGoogleUserRole(pendingGoogleUser.email, role);
-    const fullUser = { ...pendingGoogleUser, role: role };
-    closeModal('modalGoogleRoleSelect');
-    pendingGoogleUser = null;
-    saveSession(fullUser);
-  }
+async function confirmGoogleRole(role) {
+  if (!pendingGoogleUser) return;
+  const { error } = await supabaseClient.rpc('complete_my_profile', { p_role: role });
+  if (error) return alert('No se pudo guardar tu rol: ' + error.message);
+  closeModal('modalGoogleRoleSelect');
+  const user = pendingGoogleUser;
+  pendingGoogleUser = null;
+  saveSession({ ...user, role });
 }
 
-function handleSupabaseSession(supabaseUser) {
-  const existingRole = supabaseUser.user_metadata?.role;
-  const name = supabaseUser.user_metadata?.full_name || supabaseUser.email;
-  const googleRegistry = getGoogleUsersRegistry();
-  const savedLocalRole = googleRegistry[supabaseUser.email.toLowerCase()];
-  const finalRole = existingRole || savedLocalRole;
+async function handleSupabaseSession(supabaseUser) {
+  const { data: profile, error } = await supabaseClient.from('profiles').select('full_name, role, setup_complete').eq('id', supabaseUser.id).maybeSingle();
+  if (error) return alert('No se pudo cargar tu perfil: ' + error.message);
+  const name = profile?.full_name || supabaseUser.user_metadata?.full_name || supabaseUser.email;
+  const finalRole = profile?.setup_complete ? profile.role : null;
 
   if (finalRole) {
     saveSession({
@@ -431,21 +276,23 @@ async function handleAuthSubmit(e) {
   const pass = document.getElementById('authPassword').value.trim();
   const name = document.getElementById('authName').value.trim() || email.split('@')[0];
 
-  if (supabaseClient) {
+  if (!supabaseClient) return alert('La autenticación segura no está disponible. Recarga la página.');
+  {
     if (authTabMode === 'register') {
       const { data, error } = await supabaseClient.auth.signUp({
         email: email,
         password: pass,
-        options: { data: { full_name: name, role: registerRole } }
+        options: { data: { full_name: name } }
       });
 
       if (error) {
         alert('Error al registrarse en Supabase: ' + error.message);
       } else {
-        alert('¡Cuenta registrada en Supabase!');
-        if (data.user) {
-          saveSession({ id: data.user.id, name, email, role: registerRole, avatar: name.charAt(0).toUpperCase() });
-        }
+        if (data.session?.user) {
+          const { error: roleError } = await supabaseClient.rpc('complete_my_profile', { p_role: registerRole });
+          if (roleError) alert('La cuenta fue creada, pero no se pudo guardar el rol: ' + roleError.message);
+          else await handleSupabaseSession(data.user);
+        } else alert('Revisa tu correo para confirmar la cuenta antes de iniciar sesión.');
       }
     } else {
       const { data, error } = await supabaseClient.auth.signInWithPassword({ email: email, password: pass });
@@ -453,18 +300,6 @@ async function handleAuthSubmit(e) {
         alert('Error de autenticación Supabase: ' + error.message);
       } else if (data.user) {
         handleSupabaseSession(data.user);
-      }
-    }
-  } else {
-    if (authTabMode === 'register') {
-      saveSession({ name, email, role: registerRole, avatar: name.charAt(0).toUpperCase() });
-    } else {
-      const existingCust = appState.customers.find(c => c.code === pass || c.email === email || c.phone === email);
-      if (existingCust) {
-        selectedCustomerId = existingCust.id;
-        saveSession({ name: existingCust.name, email, role: 'cliente', customerId: existingCust.id, avatar: existingCust.name.charAt(0) });
-      } else {
-        saveSession({ name: name || 'Mi Tienda', email, role: 'vendedor', avatar: (name || 'V').charAt(0) });
       }
     }
   }
@@ -539,24 +374,24 @@ async function createCustomer() {
     return;
   }
 
-  let newId = 'c_' + Date.now();
-
-  if (supabaseClient) {
-    try {
+  let createdCustomer;
+  try {
       let storeId = null;
-      const { data: stores } = await supabaseClient.from('stores').select('id').limit(1);
+      const { data: stores, error: storesErr } = await supabaseClient.from('stores').select('id').eq('owner_id', currentUser.id).limit(1);
+      if (storesErr) throw storesErr;
       
       if (stores && stores.length > 0) {
         storeId = stores[0].id;
       } else {
         const { data: newStore, error: storeErr } = await supabaseClient.from('stores').insert([{
-          store_name: currentUser ? (currentUser.name + ' - Tienda') : 'Mi Tienda',
-          owner_name: currentUser ? currentUser.name : 'Vendedor',
+          owner_id: currentUser.id,
+          store_name: `${currentUser.name} - Tienda`,
+          owner_name: currentUser.name,
           phone: phone
         }]).select('id');
         
         if (newStore && newStore.length > 0) storeId = newStore[0].id;
-        if (storeErr) console.error('Error creando tienda en Supabase:', storeErr);
+        if (storeErr) throw storeErr;
       }
 
       if (storeId) {
@@ -568,22 +403,16 @@ async function createCustomer() {
           notes: notes
         }]).select('*');
 
-        if (custErr) {
-          console.error('Error insertando cliente en Supabase:', custErr);
-          alert('Atención al guardar en Supabase: ' + custErr.message);
-        } else if (createdCust && createdCust.length > 0) {
-          newId = createdCust[0].id;
-          // No se loguean datos del cliente por seguridad
-        }
-      }
-    } catch(e) {
-      console.error('Error general al insertar cliente:', e);
-    }
+        if (custErr) throw custErr;
+        if (!createdCust?.length) throw new Error('No se recibió el cliente creado.');
+        createdCustomer = createdCust[0];
+      } else throw new Error('No se pudo crear la tienda.');
+  } catch(e) {
+    console.error('Error general al insertar cliente:', e);
+    return alert('No se pudo registrar el cliente: ' + e.message);
   }
 
-  appState.customers.push({ id: newId, name, phone, code, notes });
-  saveState();
-  selectedCustomerId = newId;
+  selectedCustomerId = createdCustomer.id;
 
   nameInput.value = '';
   phoneInput.value = '';
@@ -592,7 +421,7 @@ async function createCustomer() {
 
   closeModal('modalNewCustomer');
 
-  if (supabaseClient) await fetchDataFromSupabase();
+  await fetchDataFromSupabase();
   renderVendedorView(document.getElementById('vendedorScreen'));
   
   alert(`¡Cliente "${name}" registrado correctamente! PIN asignado: ${code}`);
@@ -601,6 +430,18 @@ async function createCustomer() {
 function openAddItemModal(customerId) {
   selectedCustomerId = customerId;
   openModal('modalAddItem');
+}
+
+function selectCustomer(customerId) {
+  selectedCustomerId = customerId;
+  renderVendedorView(document.getElementById('vendedorScreen'));
+}
+
+function filterCustomers() {
+  const query = document.getElementById('searchInput')?.value.trim().toLowerCase() || '';
+  document.querySelectorAll('#customerList .customer-card').forEach((card) => {
+    card.style.display = card.textContent.toLowerCase().includes(query) ? '' : 'none';
+  });
 }
 
 // ANOTAR PRODUCTO FIADO (SUPABASE & LOCAL) — solo vendedores
@@ -623,20 +464,19 @@ async function createFiadoItem() {
   }
 
   const today = new Date().toISOString().split('T')[0];
-  let newItemId = 'i_' + Date.now();
-
-  if (supabaseClient) {
-    try {
+  try {
       let { data: account } = await supabaseClient.from('fiado_accounts').select('id').eq('customer_id', selectedCustomerId).maybeSingle();
       
       if (!account) {
-        const { data: stores } = await supabaseClient.from('stores').select('id').limit(1);
+        const { data: stores, error: storeErr } = await supabaseClient.from('stores').select('id').eq('owner_id', currentUser.id).limit(1);
+        if (storeErr) throw storeErr;
         const storeId = stores && stores.length > 0 ? stores[0].id : null;
         if (storeId) {
-          const { data: newAcc } = await supabaseClient.from('fiado_accounts').insert([{
+          const { data: newAcc, error: accountErr } = await supabaseClient.from('fiado_accounts').insert([{
             customer_id: selectedCustomerId,
             store_id: storeId
           }]).select('id');
+          if (accountErr) throw accountErr;
           if (newAcc && newAcc.length > 0) account = newAcc[0];
         }
       }
@@ -650,29 +490,18 @@ async function createFiadoItem() {
           item_date: today
         }]).select('id');
 
-        if (newItem && newItem.length > 0) newItemId = newItem[0].id;
-        if (itemErr) console.error('Error guardando producto fiado en Supabase:', itemErr);
-      }
-    } catch(e) {
-      console.error('Error insertando fiado:', e);
-    }
+        if (itemErr) throw itemErr;
+      } else throw new Error('No se pudo crear la cuenta fiada.');
+  } catch(e) {
+    console.error('Error insertando fiado:', e);
+    return alert('No se pudo guardar el producto: ' + e.message);
   }
-
-  appState.items.push({
-    id: newItemId,
-    customerId: selectedCustomerId,
-    name, qty, unitPrice,
-    date: today, verified: false
-  });
-
-  await sendChatMessage('sistema', `📦 Fiado anotado: ${qty}x ${name} (S/ ${(qty * unitPrice).toFixed(2)})`);
-
-  saveState();
+  await sendChatMessage('vendedor', `📦 Fiado anotado: ${qty}x ${name} (S/ ${(qty * unitPrice).toFixed(2)})`);
   nameInput.value = '';
   priceInput.value = '';
 
   closeModal('modalAddItem');
-  if (supabaseClient) await fetchDataFromSupabase();
+  await fetchDataFromSupabase();
   renderVendedorView(document.getElementById('vendedorScreen'));
 }
 
@@ -696,37 +525,24 @@ async function createPayment() {
     return;
   }
 
-  const today = new Date().toISOString().split('T')[0];
-  let newPayId = 'p_' + Date.now();
-
-  if (supabaseClient) {
-    try {
+  try {
       let { data: account } = await supabaseClient.from('fiado_accounts').select('id').eq('customer_id', selectedCustomerId).maybeSingle();
       if (account) {
-        const { data: newPay } = await supabaseClient.from('payments').insert([{
+        const { error: paymentErr } = await supabaseClient.from('payments').insert([{
           account_id: account.id,
           amount: amount,
           payment_method: method
         }]).select('id');
-        if (newPay && newPay.length > 0) newPayId = newPay[0].id;
-      }
-    } catch(e) {
-      console.error('Error guardando pago en Supabase:', e);
-    }
+        if (paymentErr) throw paymentErr;
+      } else throw new Error('No existe una cuenta fiada para este cliente.');
+  } catch(e) {
+    console.error('Error guardando pago:', e);
+    return alert('No se pudo registrar el pago: ' + e.message);
   }
-
-  appState.payments.push({
-    id: newPayId,
-    customerId: selectedCustomerId,
-    amount, date: today, method
-  });
-
-  await sendChatMessage('sistema', `💵 Abono registrado: S/ ${amount.toFixed(2)} vía ${method}`);
-
-  saveState();
+  await sendChatMessage('vendedor', `💵 Abono registrado: S/ ${amount.toFixed(2)} vía ${method}`);
   amountInput.value = '';
   closeModal('modalPayment');
-  if (supabaseClient) await fetchDataFromSupabase();
+  await fetchDataFromSupabase();
   renderVendedorView(document.getElementById('vendedorScreen'));
 }
 
@@ -747,22 +563,20 @@ async function sendPaymentReminder(customerId) {
 async function confirmItem(itemId) {
   const item = appState.items.find(i => i.id === itemId);
   if (item) {
-    item.verified = true;
-
-    if (supabaseClient) {
-      await supabaseClient.from('fiado_items').update({ verified_by_customer: true }).eq('id', itemId);
-    }
-
-    await sendChatMessage('sistema', `✓ El cliente corroboró la compra de: ${item.name}`);
-    saveState();
-    renderClienteView(document.getElementById('clienteScreen'));
+    const { error } = await supabaseClient.from('fiado_items').update({ verified_by_customer: true }).eq('id', itemId);
+    if (error) return alert('No se pudo corroborar el producto: ' + error.message);
+    await sendChatMessage('cliente', `✓ Corroboré la compra de: ${item.name}`);
+    await fetchDataFromSupabase();
   }
 }
 
 function openDiscrepancyModal() { openModal('modalDiscrepancy'); }
 
+function openLinkPinModal() { openModal('modalLinkPin'); }
+
 // ENVIAR REPORTAR DISCREPANCIA (CLIENTE)
 async function submitDiscrepancy() {
+  if (!selectedCustomerId) return alert('Primero vincula el PIN que te entregó tu tendero.');
   const input = document.getElementById('discComment');
   const text = input.value.trim();
   if (!text) {
@@ -770,25 +584,16 @@ async function submitDiscrepancy() {
     return;
   }
 
-  if (supabaseClient) {
-    const { data: stores } = await supabaseClient.from('stores').select('id').limit(1);
-    const storeId = stores && stores.length > 0 ? stores[0].id : null;
-
-    if (storeId) {
-      await supabaseClient.from('discrepancies').insert([{
-        customer_id: selectedCustomerId,
-        comment: text,
-        status: 'pendiente'
-      }]);
-    }
-  }
+  const { error } = await supabaseClient.from('discrepancies').insert([{
+    customer_id: selectedCustomerId, comment: text, status: 'pendiente'
+  }]);
+  if (error) return alert('No se pudo enviar el reporte: ' + error.message);
 
   await sendChatMessage('cliente', `⚠️ Reporte de observación sobre la cuenta: "${text}"`);
 
   input.value = '';
-  saveState();
   closeModal('modalDiscrepancy');
-  renderClienteView(document.getElementById('clienteScreen'));
+  await fetchDataFromSupabase();
   alert('Reporte enviado al vendedor por el chat.');
 }
 
@@ -799,12 +604,9 @@ async function deleteItem(itemId) {
     return;
   }
   if (confirm('¿Eliminar este ítem del historial fiado?')) {
-    if (supabaseClient) {
-      await supabaseClient.from('fiado_items').delete().eq('id', itemId);
-    }
-    appState.items = appState.items.filter(i => i.id !== itemId);
-    saveState();
-    renderVendedorView(document.getElementById('vendedorScreen'));
+    const { error } = await supabaseClient.from('fiado_items').delete().eq('id', itemId);
+    if (error) return alert('No se pudo eliminar el ítem: ' + error.message);
+    await fetchDataFromSupabase();
   }
 }
 
@@ -815,43 +617,16 @@ async function sendChatMessage(overrideRole, customText) {
   if (!text) return;
 
   const senderRole = overrideRole || (currentUser ? currentUser.role : 'vendedor');
-  let newMsgId = 'm_' + Date.now();
-
-  if (supabaseClient && selectedCustomerId) {
-    try {
-      const { data: stores } = await supabaseClient.from('stores').select('id').limit(1);
-      const storeId = stores && stores.length > 0 ? stores[0].id : null;
-
-      if (storeId) {
-        const { data: newMsg } = await supabaseClient.from('chat_messages').insert([{
-          customer_id: selectedCustomerId,
-          store_id: storeId,
-          sender_type: senderRole,
-          message: text
-        }]).select('id');
-        if (newMsg && newMsg.length > 0) newMsgId = newMsg[0].id;
-      }
-    } catch(e) {
-      console.error('Error insertando mensaje en Supabase:', e);
-    }
-  }
-
-  appState.chat.push({
-    id: newMsgId,
-    customerId: selectedCustomerId,
-    sender: senderRole,
-    text: text,
-    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  });
+  if (!selectedCustomerId) return alert('Selecciona una cuenta de cliente antes de enviar un mensaje.');
+  const { data: customer, error: customerErr } = await supabaseClient.from('customers').select('store_id').eq('id', selectedCustomerId).single();
+  if (customerErr) return alert('No se pudo identificar la cuenta: ' + customerErr.message);
+  const { error } = await supabaseClient.from('chat_messages').insert([{
+    customer_id: selectedCustomerId, store_id: customer.store_id, sender_type: senderRole, message: text
+  }]);
+  if (error) return alert('No se pudo enviar el mensaje: ' + error.message);
 
   if (input) input.value = '';
-  saveState();
-
-  if (currentUser && currentUser.role === 'vendedor') {
-    renderVendedorView(document.getElementById('vendedorScreen'));
-  } else {
-    renderClienteView(document.getElementById('clienteScreen'));
-  }
+  await fetchDataFromSupabase();
 }
 
 function scrollChatToBottom() {
@@ -1044,6 +819,16 @@ function renderClienteView(container) {
   const balance = activeCustomer ? getCustomerBalance(activeCustomer.id) : 0;
   const activeItems = activeCustomer ? appState.items.filter(i => i.customerId === selectedCustomerId) : [];
   const activeChat = activeCustomer ? appState.chat.filter(m => m.customerId === selectedCustomerId) : [];
+
+  if (!activeCustomer) {
+    container.innerHTML = `
+      <div class="customer-welcome-card">
+        <h2>Hola, ${escapeHtml(currentUser.name)} 👋</h2>
+        <p>Para ver tu cuenta fiada, vincula el PIN seguro que te entregó tu tendero.</p>
+        <button class="btn btn-secondary" onclick="openLinkPinModal()">🔗 Vincular mi PIN</button>
+      </div>`;
+    return;
+  }
 
   container.innerHTML = `
     <div class="customer-welcome-card">

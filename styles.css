@@ -291,38 +291,6 @@ body {
   color: var(--primary-deep);
 }
 
-.demo-box {
-  background: var(--primary-light);
-  border: 1px dashed var(--border-highlight);
-  border-radius: var(--radius-md);
-  padding: 14px;
-  margin-top: 24px;
-  text-align: left;
-  font-size: 0.8rem;
-}
-
-.demo-box h4 {
-  color: var(--primary-deep);
-  font-weight: 800;
-  margin-bottom: 6px;
-}
-
-.demo-account-btn {
-  background: white;
-  border: 1px solid var(--border-highlight);
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  font-size: 0.75rem;
-  font-weight: 700;
-  margin-top: 6px;
-  cursor: pointer;
-  margin-right: 6px;
-}
-
-.demo-account-btn:hover {
-  background: var(--accent-pink);
-}
-
 /* Banner PWA */
 .pwa-banner {
   background: linear-gradient(135deg, #FFF0F0 0%, #FFE2E2 100%);
