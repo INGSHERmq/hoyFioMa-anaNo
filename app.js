@@ -140,24 +140,25 @@ async function loadCustomersForUser(nextState) {
 }
 
 // CARGA REAL DE DATOS DESDE SUPABASE (CLIENTES, ÍTEMS, PAGOS, CHAT)
+// Devuelve { ok: true } en éxito o { ok: false, error } con el detalle real.
 async function fetchDataFromSupabase() {
-  if (!supabaseClient || !currentUser) return false;
+  if (!supabaseClient || !currentUser) return { ok: false, error: 'Sesión no disponible' };
 
   const seq = ++fetchSeq;
   const nextState = { ...EMPTY_STATE };
 
   try {
     await loadCustomersForUser(nextState);
-    if (seq !== fetchSeq) return false;
+    if (seq !== fetchSeq) return { ok: true, error: null };
 
     const { data: accountsData, error: accountsErr } = await supabaseClient.from('fiado_accounts').select('id, customer_id');
     if (accountsErr) throw accountsErr;
-    if (seq !== fetchSeq) return false;
+    if (seq !== fetchSeq) return { ok: true, error: null };
     const accountToCustomer = new Map((accountsData || []).map(a => [a.id, a.customer_id]));
 
     const { data: itemsData, error: itemsErr } = await supabaseClient.from('fiado_items').select('*');
     if (itemsErr) throw itemsErr;
-    if (seq !== fetchSeq) return false;
+    if (seq !== fetchSeq) return { ok: true, error: null };
     nextState.items = (itemsData || []).map(i => ({
       id: i.id,
       customerId: accountToCustomer.get(i.account_id),
@@ -170,7 +171,7 @@ async function fetchDataFromSupabase() {
 
     const { data: paymentsData, error: paymentsErr } = await supabaseClient.from('payments').select('*');
     if (paymentsErr) throw paymentsErr;
-    if (seq !== fetchSeq) return false;
+    if (seq !== fetchSeq) return { ok: true, error: null };
     nextState.payments = (paymentsData || []).map(p => ({
       id: p.id,
       customerId: accountToCustomer.get(p.account_id),
@@ -184,7 +185,7 @@ async function fetchDataFromSupabase() {
       .select('*')
       .order('created_at', { ascending: true });
     if (chatErr) throw chatErr;
-    if (seq !== fetchSeq) return false;
+    if (seq !== fetchSeq) return { ok: true, error: null };
     nextState.chat = (chatData || []).map(m => ({
       id: m.id,
       customerId: m.customer_id,
@@ -204,11 +205,11 @@ async function fetchDataFromSupabase() {
     }
 
     renderCurrentRoleView();
-    return true;
+    return { ok: true, error: null };
   } catch (e) {
-    if (seq !== fetchSeq) return false;
+    if (seq !== fetchSeq) return { ok: true, error: null };
     console.error('Error cargando datos de Supabase:', e);
-    return false;
+    return { ok: false, error: (e?.message || 'Error desconocido al cargar los datos') };
   }
 }
 
@@ -296,32 +297,41 @@ async function confirmLinkPin() {
   }
 
   const { data: customerId, error } = await supabaseClient.rpc('link_my_customer', { p_access_code: pin });
-  if (!error && customerId) {
-    selectedCustomerId = customerId;
-    currentUser.customerId = customerId;
-    currentUser.pin = pin;
-
-    try {
-      const linked = await fetchLinkedCustomerRecord();
-      if (linked) {
-        currentUser.name = linked.name;
-        appState.customers = [linked];
-      }
-    } catch (lookupErr) {
-      console.warn('No se pudo leer el cliente vinculado:', lookupErr);
-    }
-
-    closeModal('modalLinkPin');
-    document.getElementById('linkPinValue').value = '';
-    saveSession(currentUser);
-    const synchronized = await fetchDataFromSupabase();
-    if (!synchronized) {
-      return alert('El PIN fue vinculado, pero no se pudieron cargar los movimientos. Ejecuta supabase_production_migration.sql en Supabase y recarga la página.');
-    }
-    alert('¡Excelente! Tu cuenta ha sido vinculada y sincronizada.');
-  } else {
+  if (error || !customerId) {
     alert('No fue posible vincular el PIN: ' + (error?.message || 'código no encontrado'));
+    return;
   }
+
+  selectedCustomerId = customerId;
+  currentUser.customerId = customerId;
+  currentUser.pin = pin;
+
+  try {
+    const linked = await fetchLinkedCustomerRecord();
+    if (linked) {
+      currentUser.name = linked.name;
+      appState.customers = [linked];
+    }
+  } catch (lookupErr) {
+    console.warn('No se pudo leer el cliente vinculado:', lookupErr);
+  }
+
+  saveSession(currentUser);
+  const result = await fetchDataFromSupabase();
+
+  if (!result.ok) {
+    console.error('Error de sincronización tras vincular el PIN:', result.error);
+    alert('El PIN fue vinculado, pero no se pudieron cargar los movimientos.\n\n' +
+          'Detalle: ' + result.error + '\n\n' +
+          'Esto suele pasar si falta la migración en Supabase. Ejecuta supabase_production_migration.sql ' +
+          'en el SQL Editor de Supabase y vuelve a ingresar el PIN. El código de acceso sigue válido.');
+    renderCurrentRoleView();
+    return;
+  }
+
+  closeModal('modalLinkPin');
+  document.getElementById('linkPinValue').value = '';
+  alert('¡Excelente! Tu cuenta ha sido vinculada y sincronizada.');
 }
 
 async function loginWithGoogle() {
@@ -413,8 +423,9 @@ async function loadSupabaseSession(supabaseUser) {
 
   saveSession(userData);
   const synchronized = await fetchDataFromSupabase();
-  if (!synchronized) {
-    alert('No se pudieron cargar tus datos. Verifica tu conexión y recarga la página.');
+  if (!synchronized.ok) {
+    alert('No se pudieron cargar tus datos.\n\nDetalle: ' + (synchronized.error || 'Error desconocido') +
+          '\n\nVerifica tu conexión y recarga la página.');
   }
 }
 
@@ -567,7 +578,12 @@ async function createCustomer() {
 
   closeModal('modalNewCustomer');
 
-  await fetchDataFromSupabase();
+  const result = await fetchDataFromSupabase();
+  if (!result.ok) {
+    console.error('No se pudo recargar la lista tras registrar el cliente:', result.error);
+    return alert('El cliente fue registrado en la base de datos, pero no se pudo actualizar la lista.\n\n' +
+                 'Detalle: ' + result.error + '\n\nRecarga la página para verlo.');
+  }
   alert(`¡Cliente "${name}" registrado correctamente! PIN asignado: ${code}`);
 }
 
