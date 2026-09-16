@@ -110,6 +110,35 @@ async function initSupabaseClient() {
   }
 }
 
+function mapDbCustomer(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.full_name,
+    phone: row.phone,
+    code: row.access_code,
+    notes: row.notes || ''
+  };
+}
+
+async function fetchLinkedCustomerRecord() {
+  const { data, error } = await supabaseClient.rpc('get_my_linked_customer');
+  if (error) throw error;
+  return mapDbCustomer(data);
+}
+
+async function loadCustomersForUser(nextState) {
+  if (currentUser.role === 'cliente') {
+    const linked = await fetchLinkedCustomerRecord();
+    nextState.customers = linked ? [linked] : [];
+    return;
+  }
+
+  const { data: customersData, error: custErr } = await supabaseClient.from('customers').select('*');
+  if (custErr) throw custErr;
+  nextState.customers = (customersData || []).map(mapDbCustomer);
+}
+
 // CARGA REAL DE DATOS DESDE SUPABASE (CLIENTES, ÍTEMS, PAGOS, CHAT)
 async function fetchDataFromSupabase() {
   if (!supabaseClient || !currentUser) return false;
@@ -118,17 +147,8 @@ async function fetchDataFromSupabase() {
   const nextState = { ...EMPTY_STATE };
 
   try {
-    const { data: customersData, error: custErr } = await supabaseClient.from('customers').select('*');
-    if (custErr) throw custErr;
+    await loadCustomersForUser(nextState);
     if (seq !== fetchSeq) return false;
-
-    nextState.customers = (customersData || []).map(c => ({
-      id: c.id,
-      name: c.full_name,
-      phone: c.phone,
-      code: c.access_code,
-      notes: c.notes || ''
-    }));
 
     const { data: accountsData, error: accountsErr } = await supabaseClient.from('fiado_accounts').select('id, customer_id');
     if (accountsErr) throw accountsErr;
@@ -280,12 +300,24 @@ async function confirmLinkPin() {
     selectedCustomerId = customerId;
     currentUser.customerId = customerId;
     currentUser.pin = pin;
-    const { data: customer } = await supabaseClient.from('customers').select('full_name').eq('id', customerId).single();
-    if (customer?.full_name) currentUser.name = customer.full_name;
+
+    try {
+      const linked = await fetchLinkedCustomerRecord();
+      if (linked) {
+        currentUser.name = linked.name;
+        appState.customers = [linked];
+      }
+    } catch (lookupErr) {
+      console.warn('No se pudo leer el cliente vinculado:', lookupErr);
+    }
+
     closeModal('modalLinkPin');
+    document.getElementById('linkPinValue').value = '';
     saveSession(currentUser);
     const synchronized = await fetchDataFromSupabase();
-    if (!synchronized) return alert('El PIN fue vinculado, pero no se pudieron cargar los movimientos. Verifica que la migración de Supabase esté aplicada y recarga la página.');
+    if (!synchronized) {
+      return alert('El PIN fue vinculado, pero no se pudieron cargar los movimientos. Ejecuta supabase_production_migration.sql en Supabase y recarga la página.');
+    }
     alert('¡Excelente! Tu cuenta ha sido vinculada y sincronizada.');
   } else {
     alert('No fue posible vincular el PIN: ' + (error?.message || 'código no encontrado'));
@@ -367,15 +399,15 @@ async function loadSupabaseSession(supabaseUser) {
   };
 
   if (finalRole === 'cliente') {
-    const { data: linkedCustomer } = await supabaseClient
-      .from('customers')
-      .select('id, access_code, full_name')
-      .eq('user_id', supabaseUser.id)
-      .maybeSingle();
-    if (linkedCustomer) {
-      userData.customerId = linkedCustomer.id;
-      userData.name = linkedCustomer.full_name || userData.name;
-      selectedCustomerId = linkedCustomer.id;
+    try {
+      const linked = await fetchLinkedCustomerRecord();
+      if (linked) {
+        userData.customerId = linked.id;
+        userData.name = linked.name || userData.name;
+        selectedCustomerId = linked.id;
+      }
+    } catch (lookupErr) {
+      console.warn('No se pudo restaurar el cliente vinculado:', lookupErr);
     }
   }
 
@@ -923,7 +955,13 @@ function renderVendedorView(container) {
 }
 
 function renderClienteView(container) {
-  const activeCustomer = appState.customers.find(c => c.id === selectedCustomerId) || appState.customers[0];
+  let activeCustomer = appState.customers.find(c => c.id === selectedCustomerId) || appState.customers[0];
+
+  if (!activeCustomer && currentUser?.customerId) {
+    activeCustomer = appState.customers.find(c => c.id === currentUser.customerId) || null;
+    if (activeCustomer) selectedCustomerId = activeCustomer.id;
+  }
+
   if (activeCustomer) selectedCustomerId = activeCustomer.id;
 
   const balance = activeCustomer ? getCustomerBalance(activeCustomer.id) : 0;
@@ -987,7 +1025,7 @@ function renderClienteView(container) {
           </thead>
           <tbody>
             ${activeItems.length === 0 ? `
-              <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">No tienes productos pendientes en tu cuenta. ¡Estás al día! 🎉</td></tr>
+              <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">Tu cuenta está vinculada. Aún no hay productos fiados registrados; cuando tu tendero anote uno, aparecerá aquí.</td></tr>
             ` : activeItems.map(item => `
               <tr>
                 <td>${escapeHtml(item.date)}</td>
