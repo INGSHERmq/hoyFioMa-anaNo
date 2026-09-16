@@ -37,125 +37,188 @@ let registerRole = 'vendedor';
 let selectedCustomerId = null;
 let deferredPrompt = null;
 let supabaseClient = null;
+let sessionLoadPromise = null;
+let sessionLoadUserId = null;
+let fetchSeq = 0;
 
 // --- INICIALIZACIÓN ---
 document.addEventListener('DOMContentLoaded', () => {
   initSupabaseClient();
   registerServiceWorker();
   initPWAInstall();
-  checkSavedSession();
 });
 
-function initSupabaseClient() {
-  const cfgUrl = SUPABASE_CONFIG.url;
-  const cfgKey = SUPABASE_CONFIG.anonKey;
-  const statusBadge = document.getElementById('supabaseStatusDot');
+function waitForSupabase(maxMs = 8000) {
+  return new Promise((resolve) => {
+    if (window.supabase) return resolve(true);
+    const started = Date.now();
+    const tick = () => {
+      if (window.supabase) return resolve(true);
+      if (Date.now() - started >= maxMs) return resolve(false);
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
 
-  if (window.supabase && cfgUrl && cfgKey) {
-    try {
-      supabaseClient = window.supabase.createClient(cfgUrl, cfgKey);
-      if (statusBadge) statusBadge.innerText = '🟢 Base de datos conectada';
-      
-      supabaseClient.auth.onAuthStateChange((event, session) => {
-        if (session && session.user) {
+async function initSupabaseClient() {
+  const statusBadge = document.getElementById('supabaseStatusDot');
+  if (statusBadge) statusBadge.innerText = '🟡 Conectando…';
+
+  const supabaseReady = await waitForSupabase();
+  const cfgUrl = typeof SUPABASE_CONFIG !== 'undefined' ? SUPABASE_CONFIG.url : '';
+  const cfgKey = typeof SUPABASE_CONFIG !== 'undefined' ? SUPABASE_CONFIG.anonKey : '';
+
+  if (!supabaseReady || !cfgUrl || !cfgKey) {
+    if (statusBadge) statusBadge.innerText = '🔴 Base de datos no disponible';
+    console.error('Supabase no disponible:', { supabaseReady, cfgUrl: !!cfgUrl, cfgKey: !!cfgKey });
+    showAuthScreen();
+    return;
+  }
+
+  try {
+    supabaseClient = window.supabase.createClient(cfgUrl, cfgKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
+      }
+    });
+    if (statusBadge) statusBadge.innerText = '🟢 Base de datos conectada';
+
+    supabaseClient.auth.onAuthStateChange((event, session) => {
+      if (event === 'INITIAL_SESSION') {
+        if (session?.user) {
           handleSupabaseSession(session.user);
-        } else if (event === 'SIGNED_OUT') {
+        } else {
           showAuthScreen();
         }
-      });
-
-      supabaseClient.auth.getSession().then(({ data: { session } }) => {
-        if (session?.user) handleSupabaseSession(session.user);
-        else showAuthScreen();
-      });
-    } catch(err) {
-      console.error('Error al inicializar Supabase:', err);
-      if (statusBadge) statusBadge.innerText = '⚠️ Error Supabase';
-    }
-  } else {
-    if (statusBadge) statusBadge.innerText = '🔴 Base de datos no disponible';
-    alert('No se pudo iniciar la conexión segura con Supabase. Recarga la página o contacta al administrador.');
+        return;
+      }
+      if (event === 'SIGNED_IN' && session?.user) {
+        handleSupabaseSession(session.user);
+      } else if (event === 'SIGNED_OUT') {
+        sessionLoadUserId = null;
+        sessionLoadPromise = null;
+        showAuthScreen();
+      }
+    });
+  } catch (err) {
+    console.error('Error al inicializar Supabase:', err);
+    if (statusBadge) statusBadge.innerText = '⚠️ Error Supabase';
+    showAuthScreen();
   }
 }
 
 // CARGA REAL DE DATOS DESDE SUPABASE (CLIENTES, ÍTEMS, PAGOS, CHAT)
 async function fetchDataFromSupabase() {
-  if (!supabaseClient) return false;
+  if (!supabaseClient || !currentUser) return false;
+
+  const seq = ++fetchSeq;
+  const nextState = { ...EMPTY_STATE };
 
   try {
-    appState = { ...EMPTY_STATE };
     const { data: customersData, error: custErr } = await supabaseClient.from('customers').select('*');
     if (custErr) throw custErr;
+    if (seq !== fetchSeq) return false;
 
-    if (customersData) {
-      appState.customers = customersData.map(c => ({
-        id: c.id,
-        name: c.full_name,
-        phone: c.phone,
-        code: c.access_code,
-        notes: c.notes || ''
-      }));
-    }
+    nextState.customers = (customersData || []).map(c => ({
+      id: c.id,
+      name: c.full_name,
+      phone: c.phone,
+      code: c.access_code,
+      notes: c.notes || ''
+    }));
 
     const { data: accountsData, error: accountsErr } = await supabaseClient.from('fiado_accounts').select('id, customer_id');
     if (accountsErr) throw accountsErr;
+    if (seq !== fetchSeq) return false;
     const accountToCustomer = new Map((accountsData || []).map(a => [a.id, a.customer_id]));
 
     const { data: itemsData, error: itemsErr } = await supabaseClient.from('fiado_items').select('*');
     if (itemsErr) throw itemsErr;
-    if (itemsData) {
-      appState.items = itemsData.map(i => ({
-        id: i.id,
-        customerId: accountToCustomer.get(i.account_id),
-        name: i.product_name,
-        qty: parseFloat(i.quantity),
-        unitPrice: parseFloat(i.unit_price),
-        date: i.item_date,
-        verified: i.verified_by_customer
-      }));
-    }
+    if (seq !== fetchSeq) return false;
+    nextState.items = (itemsData || []).map(i => ({
+      id: i.id,
+      customerId: accountToCustomer.get(i.account_id),
+      name: i.product_name,
+      qty: parseFloat(i.quantity),
+      unitPrice: parseFloat(i.unit_price),
+      date: i.item_date,
+      verified: i.verified_by_customer
+    }));
 
     const { data: paymentsData, error: paymentsErr } = await supabaseClient.from('payments').select('*');
     if (paymentsErr) throw paymentsErr;
-    if (paymentsData) {
-      appState.payments = paymentsData.map(p => ({
-        id: p.id,
-        customerId: accountToCustomer.get(p.account_id),
-        amount: parseFloat(p.amount),
-        date: p.created_at ? p.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
-        method: p.payment_method
-      }));
-    }
+    if (seq !== fetchSeq) return false;
+    nextState.payments = (paymentsData || []).map(p => ({
+      id: p.id,
+      customerId: accountToCustomer.get(p.account_id),
+      amount: parseFloat(p.amount),
+      date: p.created_at ? p.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
+      method: p.payment_method
+    }));
 
-    const { data: chatData, error: chatErr } = await supabaseClient.from('chat_messages').select('*').order('created_at', { ascending: true });
+    const { data: chatData, error: chatErr } = await supabaseClient
+      .from('chat_messages')
+      .select('*')
+      .order('created_at', { ascending: true });
     if (chatErr) throw chatErr;
-    if (chatData) {
-      appState.chat = chatData.map(m => ({
-        id: m.id,
-        customerId: m.customer_id,
-        sender: m.sender_type,
-        text: m.message,
-        time: m.created_at ? new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
-      }));
-    }
+    if (seq !== fetchSeq) return false;
+    nextState.chat = (chatData || []).map(m => ({
+      id: m.id,
+      customerId: m.customer_id,
+      sender: m.sender_type,
+      text: m.message,
+      time: m.created_at ? new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+    }));
 
-    if (currentUser) {
-      if (currentUser.role === 'vendedor') {
-        renderVendedorView(document.getElementById('vendedorScreen'));
-      } else {
-        renderClienteView(document.getElementById('clienteScreen'));
+    appState = nextState;
+
+    if (currentUser.role === 'cliente') {
+      const linked = appState.customers[0];
+      if (linked) {
+        selectedCustomerId = linked.id;
+        currentUser.customerId = linked.id;
       }
     }
+
+    renderCurrentRoleView();
     return true;
-  } catch(e) {
+  } catch (e) {
+    if (seq !== fetchSeq) return false;
     console.error('Error cargando datos de Supabase:', e);
     return false;
   }
 }
 
+function renderCurrentRoleView() {
+  if (!currentUser) return;
+  if (currentUser.role === 'vendedor') {
+    renderVendedorView(document.getElementById('vendedorScreen'));
+  } else {
+    renderClienteView(document.getElementById('clienteScreen'));
+  }
+}
+
+function showRoleLoadingView() {
+  const screenId = currentUser?.role === 'cliente' ? 'clienteScreen' : 'vendedorScreen';
+  const container = document.getElementById(screenId);
+  if (container) {
+    container.innerHTML = `
+      <div class="card" style="text-align: center; padding: 48px 24px; color: var(--text-muted);">
+        <div style="font-size: 2rem; margin-bottom: 12px;">⏳</div>
+        <h3>Cargando tu información…</h3>
+        <p style="font-size: 0.9rem; margin-top: 8px;">Sincronizando clientes, fiados y mensajes.</p>
+      </div>`;
+  }
+}
+
 function registerServiceWorker() {
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(err => console.log('Error SW:', err));
+    navigator.serviceWorker.register('/sw.js')
+      .then((registration) => registration.update())
+      .catch(err => console.log('Error SW:', err));
   }
 }
 
@@ -175,11 +238,10 @@ function installPWA() {
   }
 }
 
-function checkSavedSession() { showAuthScreen(); }
-
 function saveSession(user) {
   currentUser = user;
   renderAppByRole();
+  showRoleLoadingView();
 }
 
 async function logout() {
@@ -207,7 +269,7 @@ function selectRegisterRole(role) {
 }
 
 async function confirmLinkPin() {
-  const pin = document.getElementById('linkPinValue').value.trim();
+  const pin = document.getElementById('linkPinValue').value.trim().toUpperCase();
   if (!pin) {
     alert('Ingresa un PIN válido.');
     return;
@@ -251,26 +313,41 @@ async function confirmGoogleRole(role) {
   const user = pendingGoogleUser;
   pendingGoogleUser = null;
   isSavingRole = false;
-  saveSession({ ...user, role });
-  await fetchDataFromSupabase();
+  await handleSupabaseSession({ ...user, id: user.id, email: user.email, user_metadata: { full_name: user.name } });
 }
 
 async function handleSupabaseSession(supabaseUser) {
-  const { data: profile, error } = await supabaseClient.from('profiles').select('full_name, role, setup_complete').eq('id', supabaseUser.id).maybeSingle();
-  if (error) return alert('No se pudo cargar tu perfil: ' + error.message);
+  if (sessionLoadUserId === supabaseUser.id && sessionLoadPromise) {
+    return sessionLoadPromise;
+  }
+
+  sessionLoadUserId = supabaseUser.id;
+  sessionLoadPromise = loadSupabaseSession(supabaseUser);
+  try {
+    return await sessionLoadPromise;
+  } finally {
+    if (sessionLoadUserId === supabaseUser.id) {
+      sessionLoadPromise = null;
+    }
+  }
+}
+
+async function loadSupabaseSession(supabaseUser) {
+  const { data: profile, error } = await supabaseClient
+    .from('profiles')
+    .select('full_name, role, setup_complete')
+    .eq('id', supabaseUser.id)
+    .maybeSingle();
+  if (error) {
+    alert('No se pudo cargar tu perfil: ' + error.message);
+    showAuthScreen();
+    return;
+  }
+
   const name = profile?.full_name || supabaseUser.user_metadata?.full_name || supabaseUser.email;
   const finalRole = profile?.setup_complete ? profile.role : null;
 
-  if (finalRole) {
-    saveSession({
-      id: supabaseUser.id,
-      name: name,
-      email: supabaseUser.email,
-      role: finalRole,
-      avatar: name.charAt(0).toUpperCase()
-    });
-    await fetchDataFromSupabase();
-  } else {
+  if (!finalRole) {
     pendingGoogleUser = {
       id: supabaseUser.id,
       name: name,
@@ -278,6 +355,34 @@ async function handleSupabaseSession(supabaseUser) {
       avatar: name.charAt(0).toUpperCase()
     };
     openModal('modalGoogleRoleSelect');
+    return;
+  }
+
+  const userData = {
+    id: supabaseUser.id,
+    name: name,
+    email: supabaseUser.email,
+    role: finalRole,
+    avatar: name.charAt(0).toUpperCase()
+  };
+
+  if (finalRole === 'cliente') {
+    const { data: linkedCustomer } = await supabaseClient
+      .from('customers')
+      .select('id, access_code, full_name')
+      .eq('user_id', supabaseUser.id)
+      .maybeSingle();
+    if (linkedCustomer) {
+      userData.customerId = linkedCustomer.id;
+      userData.name = linkedCustomer.full_name || userData.name;
+      selectedCustomerId = linkedCustomer.id;
+    }
+  }
+
+  saveSession(userData);
+  const synchronized = await fetchDataFromSupabase();
+  if (!synchronized) {
+    alert('No se pudieron cargar tus datos. Verifica tu conexión y recarga la página.');
   }
 }
 
@@ -302,7 +407,7 @@ async function handleAuthSubmit(e) {
         if (data.session?.user) {
           const { error: roleError } = await supabaseClient.rpc('complete_my_profile', { p_role: registerRole });
           if (roleError) alert('La cuenta fue creada, pero no se pudo guardar el rol: ' + roleError.message);
-          else await handleSupabaseSession(data.user);
+          else await handleSupabaseSession(data.session.user);
         } else alert('Revisa tu correo para confirmar la cuenta antes de iniciar sesión.');
       }
     } else {
@@ -310,7 +415,7 @@ async function handleAuthSubmit(e) {
       if (error) {
         alert('Error de autenticación Supabase: ' + error.message);
       } else if (data.user) {
-        handleSupabaseSession(data.user);
+        await handleSupabaseSession(data.user);
       }
     }
   }
@@ -334,12 +439,10 @@ function renderAppByRole() {
   if (currentUser.role === 'vendedor') {
     document.getElementById('vendedorScreen').style.display = 'block';
     document.getElementById('clienteScreen').style.display = 'none';
-    renderVendedorView(document.getElementById('vendedorScreen'));
   } else {
     document.getElementById('vendedorScreen').style.display = 'none';
     document.getElementById('clienteScreen').style.display = 'block';
     if (currentUser.customerId) selectedCustomerId = currentUser.customerId;
-    renderClienteView(document.getElementById('clienteScreen'));
   }
 }
 
@@ -377,7 +480,7 @@ async function createCustomer() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Sin 0,O,1,I para evitar confusiones
     return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   };
-  const code = codeInput.value.trim() || generateSecurePin();
+  const code = (codeInput.value.trim() || generateSecurePin()).toUpperCase();
   const notes = notesInput.value.trim();
 
   if (!name || !phone) {
@@ -433,8 +536,6 @@ async function createCustomer() {
   closeModal('modalNewCustomer');
 
   await fetchDataFromSupabase();
-  renderVendedorView(document.getElementById('vendedorScreen'));
-  
   alert(`¡Cliente "${name}" registrado correctamente! PIN asignado: ${code}`);
 }
 
@@ -513,7 +614,6 @@ async function createFiadoItem() {
 
   closeModal('modalAddItem');
   await fetchDataFromSupabase();
-  renderVendedorView(document.getElementById('vendedorScreen'));
 }
 
 function openPaymentModal(customerId) {
@@ -554,7 +654,6 @@ async function createPayment() {
   amountInput.value = '';
   closeModal('modalPayment');
   await fetchDataFromSupabase();
-  renderVendedorView(document.getElementById('vendedorScreen'));
 }
 
 async function sendPaymentReminder(customerId) {
