@@ -92,7 +92,7 @@ async function initSupabaseClient() {
       }
     });
     dbg('Supabase client creado:', cfgUrl);
-    if (statusBadge) statusBadge.innerText = '🟢 Base de datos conectada';
+    if (statusBadge) statusBadge.innerText = '🟢 Base de datos funcionando';
 
     supabaseClient.auth.onAuthStateChange((event, session) => {
       dbg('auth event:', event, 'user:', session?.user?.id || null);
