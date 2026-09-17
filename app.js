@@ -4,6 +4,12 @@
 
 const EMPTY_STATE = { customers: [], items: [], payments: [], chat: [] };
 
+// --- DIAGNÓSTICO: imprime con prefijo en consola ---
+const DBG = true;
+function dbg(...args) {
+  if (DBG) console.log('[HF]', ...args);
+}
+
 // --- SEGURIDAD: SANITIZACIÓN XSS ---
 // Escapa caracteres HTML peligrosos antes de insertar datos en innerHTML.
 // SIEMPRE usar esta función con datos que vienen de la BD o del usuario.
@@ -85,9 +91,11 @@ async function initSupabaseClient() {
         detectSessionInUrl: true
       }
     });
+    dbg('Supabase client creado:', cfgUrl);
     if (statusBadge) statusBadge.innerText = '🟢 Base de datos conectada';
 
     supabaseClient.auth.onAuthStateChange((event, session) => {
+      dbg('auth event:', event, 'user:', session?.user?.id || null);
       if (event === 'INITIAL_SESSION') {
         if (session?.user) {
           handleSupabaseSession(session.user);
@@ -123,20 +131,30 @@ function mapDbCustomer(row) {
 }
 
 async function fetchLinkedCustomerRecord() {
+  dbg('RPC get_my_linked_customer → iniciando');
   const { data, error } = await supabaseClient.rpc('get_my_linked_customer');
-  if (error) throw error;
+  if (error) {
+    dbg('RPC get_my_linked_customer → ERROR:', error);
+    throw error;
+  }
+  dbg('RPC get_my_linked_customer → data:', data);
   return mapDbCustomer(data);
 }
 
 async function loadCustomersForUser(nextState) {
   if (currentUser.role === 'cliente') {
     const linked = await fetchLinkedCustomerRecord();
+    dbg('clientes (cliente/vinculado):', linked);
     nextState.customers = linked ? [linked] : [];
     return;
   }
 
   const { data: customersData, error: custErr } = await supabaseClient.from('customers').select('*');
-  if (custErr) throw custErr;
+  if (custErr) {
+    dbg('consulta customers → ERROR:', custErr);
+    throw custErr;
+  }
+  dbg('consulta customers → filas:', (customersData || []).length, customersData);
   nextState.customers = (customersData || []).map(mapDbCustomer);
 }
 
@@ -170,6 +188,7 @@ async function fetchDataFromSupabase() {
   try {
     await loadCustomersForUserWrapped();
     if (seq !== fetchSeq) return { ok: true, error: null };
+    dbg('fetch #' + seq + ' | clientes OK:', nextState.customers.length);
 
     const accountsData = await queryWrapped('fiado_accounts', async () => {
       const { data, error } = await supabaseClient.from('fiado_accounts').select('id, customer_id');
@@ -177,6 +196,7 @@ async function fetchDataFromSupabase() {
       return data || [];
     });
     if (seq !== fetchSeq) return { ok: true, error: null };
+    dbg('fetch #' + seq + ' | fiado_accounts OK:', accountsData.length);
     const accountToCustomer = new Map(accountsData.map(a => [a.id, a.customer_id]));
 
     nextState.items = await queryWrapped('fiado_items', async () => {
@@ -193,6 +213,7 @@ async function fetchDataFromSupabase() {
       }));
     });
     if (seq !== fetchSeq) return { ok: true, error: null };
+    dbg('fetch #' + seq + ' | fiado_items OK:', nextState.items.length);
 
     nextState.payments = await queryWrapped('payments', async () => {
       const { data, error } = await supabaseClient.from('payments').select('*');
@@ -206,6 +227,7 @@ async function fetchDataFromSupabase() {
       }));
     });
     if (seq !== fetchSeq) return { ok: true, error: null };
+    dbg('fetch #' + seq + ' | payments OK:', nextState.payments.length);
 
     nextState.chat = await queryWrapped('chat_messages', async () => {
       const { data, error } = await supabaseClient
@@ -222,6 +244,7 @@ async function fetchDataFromSupabase() {
       }));
     });
     if (seq !== fetchSeq) return { ok: true, error: null };
+    dbg('fetch #' + seq + ' | chat OK:', nextState.chat.length);
 
     appState = nextState;
 
@@ -235,6 +258,7 @@ async function fetchDataFromSupabase() {
 
     lastLoadError = null;
     renderCurrentRoleView();
+    dbg('fetch #' + seq + ' → COMPLETADO. customers en appState:', appState.customers.length);
     return { ok: true, error: null };
   } catch (e) {
     if (seq !== fetchSeq) return { ok: true, error: null };
@@ -242,6 +266,7 @@ async function fetchDataFromSupabase() {
     appState = nextState;
     lastLoadError = failures.length ? failures.join(' | ') : (e?.message || 'Error desconocido al cargar los datos');
     renderCurrentRoleView();
+    dbg('fetch #' + seq + ' → FALLÓ:', lastLoadError);
     return { ok: false, error: lastLoadError };
   }
 }
@@ -267,10 +292,27 @@ async function forceRefreshAll() {
 
 function renderCurrentRoleView() {
   if (!currentUser) return;
-  if (currentUser.role === 'vendedor') {
-    renderVendedorView(document.getElementById('vendedorScreen'));
-  } else {
-    renderClienteView(document.getElementById('clienteScreen'));
+  const container = currentUser.role === 'vendedor'
+    ? document.getElementById('vendedorScreen')
+    : document.getElementById('clienteScreen');
+  dbg('renderCurrentRoleView →', currentUser.role, '| customers:', appState.customers.length, '| selectedCustomerId:', selectedCustomerId);
+  try {
+    if (currentUser.role === 'vendedor') {
+      renderVendedorView(container);
+    } else {
+      renderClienteView(container);
+    }
+  } catch (err) {
+    console.error('EXCEPCIÓN DE RENDERIZADO (causa pantalla en blanco):', err);
+    if (container) {
+      container.innerHTML = `
+        <div class="card" style="text-align:center; padding:48px 24px; color:var(--text-muted);">
+          <div style="font-size:2rem; margin-bottom:12px;">🛠</div>
+          <h3>Ocurrió un error al dibujar la pantalla</h3>
+          <p style="font-size:0.85rem; margin-top:8px;"><code>${escapeHtml(err?.message || String(err))}</code></p>
+          <button class="btn btn-primary" style="margin-top:12px;" onclick="forceRefreshAll()">🔄 Reintentar</button>
+        </div>`;
+    }
   }
 }
 
@@ -347,8 +389,10 @@ async function confirmLinkPin() {
     alert('Ingresa un PIN válido.');
     return;
   }
+  dbg('confirmLinkPin → intentando vincular con PIN:', pin);
 
   const { data: customerId, error } = await supabaseClient.rpc('link_my_customer', { p_access_code: pin });
+  dbg('confirmLinkPin → link_my_customer:', { data: customerId, error });
   if (error || !customerId) {
     alert('No fue posible vincular el PIN: ' + (error?.message || 'código no encontrado'));
     return;
@@ -364,12 +408,14 @@ async function confirmLinkPin() {
       currentUser.name = linked.name;
       appState.customers = [linked];
     }
+    dbg('confirmLinkPin → registro vinculado:', linked);
   } catch (lookupErr) {
     console.warn('No se pudo leer el cliente vinculado:', lookupErr);
   }
 
   saveSession(currentUser);
   const result = await fetchDataFromSupabase();
+  dbg('confirmLinkPin → fetchDataFromSupabase:', result);
 
   if (!result.ok) {
     console.error('Error de sincronización tras vincular el PIN:', result.error);
@@ -427,19 +473,23 @@ async function handleSupabaseSession(supabaseUser) {
 }
 
 async function loadSupabaseSession(supabaseUser) {
+  dbg('loadSupabaseSession → usuario:', supabaseUser.id, supabaseUser.email);
   const { data: profile, error } = await supabaseClient
     .from('profiles')
     .select('full_name, role, setup_complete')
     .eq('id', supabaseUser.id)
     .maybeSingle();
   if (error) {
+    dbg('loadSupabaseSession → consulta profile ERROR:', error);
     alert('No se pudo cargar tu perfil: ' + error.message);
     showAuthScreen();
     return;
   }
+  dbg('loadSupabaseSession → profile:', profile);
 
   const name = profile?.full_name || supabaseUser.user_metadata?.full_name || supabaseUser.email;
   const finalRole = profile?.setup_complete ? profile.role : null;
+  dbg('loadSupabaseSession → finalRole:', finalRole);
 
   if (!finalRole) {
     pendingGoogleUser = {
@@ -468,6 +518,7 @@ async function loadSupabaseSession(supabaseUser) {
         userData.name = linked.name || userData.name;
         selectedCustomerId = linked.id;
       }
+      dbg('loadSupabaseSession → cliente vinculado:', linked);
     } catch (lookupErr) {
       console.warn('No se pudo restaurar el cliente vinculado:', lookupErr);
     }
@@ -475,6 +526,7 @@ async function loadSupabaseSession(supabaseUser) {
 
   saveSession(userData);
   const synchronized = await fetchDataFromSupabase();
+  dbg('loadSupabaseSession → fetchDataFromSupabase:', synchronized);
   if (!synchronized.ok) {
     alert('No se pudieron cargar tus datos.\n\nDetalle: ' + (synchronized.error || 'Error desconocido') +
           '\n\nVerifica tu conexión y recarga la página.');
@@ -507,6 +559,7 @@ async function handleAuthSubmit(e) {
       }
     } else {
       const { data, error } = await supabaseClient.auth.signInWithPassword({ email: email, password: pass });
+      dbg('signInWithPassword →', { error, user: data.user?.id });
       if (error) {
         alert('Error de autenticación Supabase: ' + error.message);
       } else if (data.user) {
@@ -588,7 +641,8 @@ async function createCustomer() {
       let storeId = null;
       const { data: stores, error: storesErr } = await supabaseClient.from('stores').select('id').eq('owner_id', currentUser.id).limit(1);
       if (storesErr) throw storesErr;
-      
+      dbg('createCustomer → tiendas del vendedor:', stores);
+
       if (stores && stores.length > 0) {
         storeId = stores[0].id;
       } else {
@@ -598,9 +652,10 @@ async function createCustomer() {
           owner_name: currentUser.name,
           phone: phone
         }]).select('id');
-        
+
         if (newStore && newStore.length > 0) storeId = newStore[0].id;
         if (storeErr) throw storeErr;
+        dbg('createCustomer → tienda creada:', storeId);
       }
 
       if (storeId) {
@@ -615,6 +670,7 @@ async function createCustomer() {
         if (custErr) throw custErr;
         if (!createdCust?.length) throw new Error('No se recibió el cliente creado.');
         createdCustomer = createdCust[0];
+        dbg('createCustomer → cliente insertado:', createdCustomer);
       } else throw new Error('No se pudo crear la tienda.');
   } catch(e) {
     console.error('Error general al insertar cliente:', e);
@@ -631,6 +687,7 @@ async function createCustomer() {
   closeModal('modalNewCustomer');
 
   const result = await fetchDataFromSupabase();
+  dbg('createCustomer → fetchDataFromSupabase:', result);
   if (!result.ok) {
     console.error('No se pudo recargar la lista tras registrar el cliente:', result.error);
     return alert('El cliente fue registrado en la base de datos, pero no se pudo actualizar la lista.\n\n' +
@@ -848,6 +905,7 @@ function scrollChatToBottom() {
 
 // RENDERIZADO VENDEDOR Y CLIENTE
 function renderVendedorView(container) {
+  dbg('renderVendedorView → customers en state:', appState.customers.length, '| selected:', selectedCustomerId);
   const metrics = getStoreMetrics();
   const activeCustomer = appState.customers.find(c => c.id === selectedCustomerId) || appState.customers[0];
   if (activeCustomer) selectedCustomerId = activeCustomer.id;
@@ -1024,6 +1082,7 @@ function renderVendedorView(container) {
 }
 
 function renderClienteView(container) {
+  dbg('renderClienteView → customers en state:', appState.customers.length, '| selected:', selectedCustomerId, '| customerId set:', currentUser?.customerId || null);
   let activeCustomer = appState.customers.find(c => c.id === selectedCustomerId) || appState.customers[0];
 
   if (!activeCustomer && currentUser?.customerId) {
