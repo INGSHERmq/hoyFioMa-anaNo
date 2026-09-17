@@ -40,6 +40,7 @@ let supabaseClient = null;
 let sessionLoadPromise = null;
 let sessionLoadUserId = null;
 let fetchSeq = 0;
+let lastLoadError = null;
 
 // --- INICIALIZACIÓN ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -140,59 +141,87 @@ async function loadCustomersForUser(nextState) {
 }
 
 // CARGA REAL DE DATOS DESDE SUPABASE (CLIENTES, ÍTEMS, PAGOS, CHAT)
-// Devuelve { ok: true } en éxito o { ok: false, error } con el detalle real.
+// Devuelve { ok: true } en éxito o { ok: false, error } con el paso exacto que falló.
+// En caso de error se renderiza lo que sí se pudo cargar para nunca dejar la pantalla en blanco.
 async function fetchDataFromSupabase() {
   if (!supabaseClient || !currentUser) return { ok: false, error: 'Sesión no disponible' };
 
   const seq = ++fetchSeq;
   const nextState = { ...EMPTY_STATE };
+  const failures = [];
+
+  const loadCustomersForUserWrapped = async () => {
+    try {
+      await loadCustomersForUser(nextState);
+    } catch (e) {
+      failures.push(`customers: ${e?.message || e}`);
+      throw e;
+    }
+  };
+  const queryWrapped = async (label, fn) => {
+    try {
+      return await fn();
+    } catch (e) {
+      failures.push(`${label}: ${e?.message || e}`);
+      throw e;
+    }
+  };
 
   try {
-    await loadCustomersForUser(nextState);
+    await loadCustomersForUserWrapped();
     if (seq !== fetchSeq) return { ok: true, error: null };
 
-    const { data: accountsData, error: accountsErr } = await supabaseClient.from('fiado_accounts').select('id, customer_id');
-    if (accountsErr) throw accountsErr;
+    const accountsData = await queryWrapped('fiado_accounts', async () => {
+      const { data, error } = await supabaseClient.from('fiado_accounts').select('id, customer_id');
+      if (error) throw error;
+      return data || [];
+    });
     if (seq !== fetchSeq) return { ok: true, error: null };
-    const accountToCustomer = new Map((accountsData || []).map(a => [a.id, a.customer_id]));
+    const accountToCustomer = new Map(accountsData.map(a => [a.id, a.customer_id]));
 
-    const { data: itemsData, error: itemsErr } = await supabaseClient.from('fiado_items').select('*');
-    if (itemsErr) throw itemsErr;
+    nextState.items = await queryWrapped('fiado_items', async () => {
+      const { data, error } = await supabaseClient.from('fiado_items').select('*');
+      if (error) throw error;
+      return (data || []).map(i => ({
+        id: i.id,
+        customerId: accountToCustomer.get(i.account_id),
+        name: i.product_name,
+        qty: parseFloat(i.quantity),
+        unitPrice: parseFloat(i.unit_price),
+        date: i.item_date,
+        verified: i.verified_by_customer
+      }));
+    });
     if (seq !== fetchSeq) return { ok: true, error: null };
-    nextState.items = (itemsData || []).map(i => ({
-      id: i.id,
-      customerId: accountToCustomer.get(i.account_id),
-      name: i.product_name,
-      qty: parseFloat(i.quantity),
-      unitPrice: parseFloat(i.unit_price),
-      date: i.item_date,
-      verified: i.verified_by_customer
-    }));
 
-    const { data: paymentsData, error: paymentsErr } = await supabaseClient.from('payments').select('*');
-    if (paymentsErr) throw paymentsErr;
+    nextState.payments = await queryWrapped('payments', async () => {
+      const { data, error } = await supabaseClient.from('payments').select('*');
+      if (error) throw error;
+      return (data || []).map(p => ({
+        id: p.id,
+        customerId: accountToCustomer.get(p.account_id),
+        amount: parseFloat(p.amount),
+        date: p.created_at ? p.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
+        method: p.payment_method
+      }));
+    });
     if (seq !== fetchSeq) return { ok: true, error: null };
-    nextState.payments = (paymentsData || []).map(p => ({
-      id: p.id,
-      customerId: accountToCustomer.get(p.account_id),
-      amount: parseFloat(p.amount),
-      date: p.created_at ? p.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
-      method: p.payment_method
-    }));
 
-    const { data: chatData, error: chatErr } = await supabaseClient
-      .from('chat_messages')
-      .select('*')
-      .order('created_at', { ascending: true });
-    if (chatErr) throw chatErr;
+    nextState.chat = await queryWrapped('chat_messages', async () => {
+      const { data, error } = await supabaseClient
+        .from('chat_messages')
+        .select('*')
+        .order('created_at', { ascending: true });
+      if (error) throw error;
+      return (data || []).map(m => ({
+        id: m.id,
+        customerId: m.customer_id,
+        sender: m.sender_type,
+        text: m.message,
+        time: m.created_at ? new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+      }));
+    });
     if (seq !== fetchSeq) return { ok: true, error: null };
-    nextState.chat = (chatData || []).map(m => ({
-      id: m.id,
-      customerId: m.customer_id,
-      sender: m.sender_type,
-      text: m.message,
-      time: m.created_at ? new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
-    }));
 
     appState = nextState;
 
@@ -204,12 +233,35 @@ async function fetchDataFromSupabase() {
       }
     }
 
+    lastLoadError = null;
     renderCurrentRoleView();
     return { ok: true, error: null };
   } catch (e) {
     if (seq !== fetchSeq) return { ok: true, error: null };
-    console.error('Error cargando datos de Supabase:', e);
-    return { ok: false, error: (e?.message || 'Error desconocido al cargar los datos') };
+    console.error('Error cargando datos de Supabase en', failures, e);
+    appState = nextState;
+    lastLoadError = failures.length ? failures.join(' | ') : (e?.message || 'Error desconocido al cargar los datos');
+    renderCurrentRoleView();
+    return { ok: false, error: lastLoadError };
+  }
+}
+
+function renderLoadErrorBanner() {
+  if (!lastLoadError) return '';
+  return `
+    <div style="background: #FDE8E8; border: 1px solid #F5A6A6; color: #B00020; border-radius: 12px; padding: 12px 16px; margin-bottom: 16px; font-size: 0.85rem;">
+      <strong>⚠️ No se pudo cargar toda la información.</strong>
+      <br>Detalle: <code style="font-size: 0.75rem;">${escapeHtml(lastLoadError)}</code>
+      <br><button class="btn btn-outline btn-sm" style="margin-top: 8px;" onclick="forceRefreshAll()">🔄 Reintentar carga</button>
+    </div>`;
+}
+
+async function forceRefreshAll() {
+  lastLoadError = null;
+  showRoleLoadingView();
+  const result = await fetchDataFromSupabase();
+  if (!result.ok) {
+    alert('No se pudieron cargar los datos.\n\nDetalle: ' + result.error);
   }
 }
 
@@ -805,6 +857,7 @@ function renderVendedorView(container) {
   const activeChat = activeCustomer ? appState.chat.filter(m => m.customerId === selectedCustomerId) : [];
 
   container.innerHTML = `
+    ${renderLoadErrorBanner()}
     <div class="metrics-grid">
       <div class="metric-card accent">
         <div class="metric-icon">💰</div>
@@ -986,15 +1039,26 @@ function renderClienteView(container) {
 
   if (!activeCustomer) {
     container.innerHTML = `
+      ${renderLoadErrorBanner()}
       <div class="customer-welcome-card">
         <h2>Hola, ${escapeHtml(currentUser.name)} 👋</h2>
-        <p>Para ver tu cuenta fiada, vincula el PIN seguro que te entregó tu tendero.</p>
-        <button class="btn btn-secondary" onclick="openLinkPinModal()">🔗 Vincular mi PIN</button>
+        ${currentUser.customerId ? `
+          <p>Tu cuenta <strong>sí</strong> está vinculada (ID: <code style="font-size:0.7rem;">${escapeHtml(currentUser.customerId)}</code>),
+          pero no se encontró tu registro al cargar los datos. Presiona el botón para reintentar o vuelve a vincular tu PIN.</p>
+          <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:4px;">
+            <button class="btn btn-primary" onclick="forceRefreshAll()">🔄 Reintentar</button>
+            <button class="btn btn-secondary" onclick="openLinkPinModal()">🔗 Vincular mi PIN</button>
+          </div>
+        ` : `
+          <p>Para ver tu cuenta fiada, vincula el PIN seguro que te entregó tu tendero.</p>
+          <button class="btn btn-secondary" onclick="openLinkPinModal()">🔗 Vincular mi PIN</button>
+        `}
       </div>`;
     return;
   }
 
   container.innerHTML = `
+    ${renderLoadErrorBanner()}
     <div class="customer-welcome-card">
       <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
         <div>

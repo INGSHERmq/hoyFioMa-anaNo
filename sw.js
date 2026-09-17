@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hoyfio-cache-v6';
+const CACHE_NAME = 'hoyfio-cache-v7';
 const STATIC_ASSETS = [
   '/styles.css',
   '/manifest.json',
