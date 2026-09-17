@@ -154,8 +154,9 @@ async function loadCustomersForUser(nextState) {
     dbg('consulta customers → ERROR:', custErr);
     throw custErr;
   }
-  dbg('consulta customers → filas:', (customersData || []).length, customersData);
-  nextState.customers = (customersData || []).map(mapDbCustomer);
+  const mapped = (customersData || []).map(mapDbCustomer).filter(c => c !== null);
+  dbg('consulta customers → filas:', mapped.length, mapped);
+  nextState.customers = mapped;
 }
 
 // CARGA REAL DE DATOS DESDE SUPABASE (CLIENTES, ÍTEMS, PAGOS, CHAT)
@@ -1083,11 +1084,23 @@ function renderVendedorView(container) {
 
 function renderClienteView(container) {
   dbg('renderClienteView → customers en state:', appState.customers.length, '| selected:', selectedCustomerId, '| customerId set:', currentUser?.customerId || null);
-  let activeCustomer = appState.customers.find(c => c.id === selectedCustomerId) || appState.customers[0];
+  let activeCustomer = null;
 
+  // 1. Try to find customer matching selectedCustomerId
+  if (selectedCustomerId) {
+    activeCustomer = appState.customers.find(c => c.id === selectedCustomerId);
+  }
+
+  // 2. If not found and currentUser has customerId, try matching by currentUser.customerId
   if (!activeCustomer && currentUser?.customerId) {
-    activeCustomer = appState.customers.find(c => c.id === currentUser.customerId) || null;
+    activeCustomer = appState.customers.find(c => c.id === currentUser.customerId);
     if (activeCustomer) selectedCustomerId = activeCustomer.id;
+  }
+
+  // 3. If still not found, try the first customer in state
+  if (!activeCustomer && appState.customers.length > 0) {
+    activeCustomer = appState.customers[0];
+    selectedCustomerId = activeCustomer.id;
   }
 
   if (activeCustomer) selectedCustomerId = activeCustomer.id;
